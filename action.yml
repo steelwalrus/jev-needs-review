@@ -1,0 +1,59 @@
+name: Jev needs review
+description: Triage a pull request for human review
+inputs:
+  api-key:
+    description: TypeSafe API key
+    required: true
+  task:
+    description: Intended change (defaults to the pull request title and description)
+  base:
+    description: Base commit (defaults to the pull request base SHA)
+  max-risk:
+    description: Default per-question threshold from 0 to 100 (experimental)
+    default: '20'
+  thresholds:
+    description: JSON object of per-question threshold overrides
+    default: '{}'
+  policy:
+    description: Repo-relative JSON path with thresholds for every built-in question, read from the PR base commit
+    default: ''
+outputs:
+  decision:
+    description: merge_candidate or human_review; unset on operational failure
+    value: ${{ steps.review.outputs.decision }}
+  risk-score:
+    description: Highest individual risk from 0 to 100; empty when review is required without Jev
+    value: ${{ steps.review.outputs.risk-score }}
+  head-sha:
+    description: Exact reviewed commit
+    value: ${{ steps.review.outputs.head-sha }}
+  triage:
+    description: JSON decision, reviewed commits, scores, thresholds, and reasons
+    value: ${{ steps.review.outputs.triage }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.pull_request.head.sha }}
+        fetch-depth: 0
+        persist-credentials: false
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.3.14
+    - name: Install Jev dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: bun install --frozen-lockfile --ignore-scripts
+    - name: Review
+      id: review
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      env:
+        TYPESAFE_API_KEY: ${{ inputs.api-key }}
+        JEV_TASK: ${{ inputs.task || format('{0} {1}', github.event.pull_request.title, github.event.pull_request.body) }}
+        JEV_BASE: ${{ inputs.base || github.event.pull_request.base.sha }}
+        JEV_MAX_RISK: ${{ inputs.max-risk }}
+        JEV_THRESHOLDS: ${{ inputs.thresholds }}
+        JEV_POLICY: ${{ inputs.policy }}
+      run: bun --no-env-file src/cli.ts --repo "$GITHUB_WORKSPACE" --task "$JEV_TASK" --base "$JEV_BASE" --max-risk "$JEV_MAX_RISK" --thresholds "$JEV_THRESHOLDS" --policy "$JEV_POLICY"
