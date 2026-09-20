@@ -9,7 +9,7 @@ inputs:
   base:
     description: Base commit (defaults to the pull request base SHA)
   max-risk:
-    description: Default per-question threshold from 0 to 100 (experimental)
+    description: Maximum concern + unresolved probability per question, 0 to 100 (experimental)
     default: '20'
   thresholds:
     description: JSON object of per-question threshold overrides
@@ -22,13 +22,13 @@ outputs:
     description: merge_candidate or human_review; unset on operational failure
     value: ${{ steps.review.outputs.decision }}
   risk-score:
-    description: Highest individual risk from 0 to 100; empty when review is required without Jev
+    description: Highest concern + unresolved probability from 0 to 100; empty when review is required without Jev
     value: ${{ steps.review.outputs.risk-score }}
   head-sha:
     description: Exact reviewed commit
     value: ${{ steps.review.outputs.head-sha }}
   triage:
-    description: JSON decision, reviewed commits, scores, thresholds, and reasons
+    description: JSON policy version, decision, reviewed commits, choices, probabilities, confidence, scores, thresholds, and reasons
     value: ${{ steps.review.outputs.triage }}
 runs:
   using: composite

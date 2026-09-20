@@ -9,10 +9,12 @@ import { prepareState } from "../src/git";
 import { assessReview, evaluateReview, reviewRequest, validateThresholds } from "../src/jev";
 import { reviewQuestions } from "../src/questions";
 
-function response(probability = 0.1): SystemOneResult<typeof reviewQuestions> {
+function response(concern = 0.1, unresolved = 0): SystemOneResult<typeof reviewQuestions> {
+  const probabilities = { clear: 1 - concern - unresolved, concern, unresolved };
+  const choice = probabilities.clear >= Math.max(concern, unresolved) ? "clear" : concern >= unresolved ? "concern" : "unresolved";
   return {
     model: "test-model", usage: { input_tokens: 10, output_tokens: 8 },
-    answers: Object.fromEntries(Object.keys(reviewQuestions).map(id => [id, { type: "noul", noul: probability }])) as SystemOneResult<typeof reviewQuestions>["answers"],
+    answers: Object.fromEntries(Object.keys(reviewQuestions).map(id => [id, { type: "choice", choice, probabilities, confidence: 0.9 }])) as SystemOneResult<typeof reviewQuestions>["answers"],
   };
 }
 
@@ -30,13 +32,31 @@ test("the real SDK sends one typed request and its answers drive the decision", 
   expect(calls).toBe(1);
   expect(assessReview(simpleChange, result).decision).toBe("merge_candidate");
   expect(assessReview(simpleChange, response(0.2)).decision).toBe("merge_candidate");
-  const highRisk = { ...response(), answers: { ...response().answers, securityBoundary: { type: "noul" as const, noul: 0.9 } } };
-  expect(assessReview(simpleChange, highRisk)).toMatchObject({ decision: "human_review", riskScore: 90, reasons: ["securityBoundary"] });
-  expect(assessReview(simpleChange, highRisk, 20, { securityBoundary: 90 }).decision).toBe("merge_candidate");
+  for (const id of ["securityBoundary", "databaseRisk", "compatibilityRisk"] as const) {
+    const highRisk = { ...response(), answers: { ...response().answers, [id]: response(0.9).answers[id] } };
+    expect(assessReview(simpleChange, highRisk)).toMatchObject({ decision: "human_review", riskScore: 90, reasons: [`${id}:concern`] });
+    expect(assessReview(simpleChange, highRisk, 20, { [id]: 90 }).decision).toBe("merge_candidate");
+  }
   expect(assessReview(simpleChange, response(0.1), 20, { securityBoundary: 5 })).toMatchObject({
-    decision: "human_review", reasons: ["securityBoundary"],
-    signals: expect.arrayContaining([{ id: "securityBoundary", risk: 10, threshold: 5 }]),
+    decision: "human_review", reasons: ["securityBoundary:uncertain"],
+    signals: expect.arrayContaining([expect.objectContaining({ id: "securityBoundary", risk: 10, threshold: 5 })]),
   });
+});
+
+test("missing evidence belongs to its risk and clear needs sufficient probability", () => {
+  const result = { ...response(), answers: { ...response().answers, compatibilityRisk: response(0.05, 0.9).answers.compatibilityRisk } };
+  expect(assessReview(simpleChange, result)).toMatchObject({
+    decision: "human_review", reasons: ["compatibilityRisk:unresolved"],
+    signals: expect.arrayContaining([expect.objectContaining({
+      id: "compatibilityRisk", choice: "unresolved", confidence: 0.9,
+      probabilities: { clear: expect.closeTo(0.05), concern: 0.05, unresolved: 0.9 },
+    })]),
+  });
+  const ambiguous = { ...result, answers: { ...result.answers, compatibilityRisk: response(0.15, 0.15).answers.compatibilityRisk } };
+  expect(assessReview(simpleChange, ambiguous).reasons).toEqual(["compatibilityRisk:uncertain"]);
+  // Decimal rounding at the 80% clear boundary must not trigger review.
+  expect(assessReview(simpleChange, response(0.14, 0.06)).decision).toBe("merge_candidate");
+  expect(assessReview(simpleChange, response(0.140001, 0.06)).decision).toBe("human_review");
 });
 
 test("opaque or truncated input cannot qualify; malformed answers fail closed", () => {
@@ -46,6 +66,20 @@ test("opaque or truncated input cannot qualify; malformed answers fail closed", 
   ]) expect(assessReview(state, response(0)).decision).toBe("human_review");
   for (const invalid of [NaN, Infinity, -0.1, 1.1]) {
     expect(() => assessReview(simpleChange, response(invalid))).toThrow("invalid Jev answer");
+  }
+  for (const malformed of [
+    { type: "noul", noul: 0.01 },
+    { ...response().answers.securityBoundary, choice: "unknown" },
+    { ...response().answers.securityBoundary, choice: "concern" },
+    { ...response().answers.securityBoundary, confidence: "0.9" },
+    { ...response().answers.securityBoundary, confidence: 1.1 },
+    { ...response().answers.securityBoundary, probabilities: { clear: 0.9, concern: 0.1 } },
+    { ...response().answers.securityBoundary, probabilities: { clear: "0.9", concern: 0.1, unresolved: 0 } },
+    { ...response().answers.securityBoundary, probabilities: { clear: 0.9, concern: 0.1, unresolved: 0.2 } },
+    { ...response().answers.securityBoundary, probabilities: { clear: 0.9, concern: 0.1, unresolved: 0, other: 0 } },
+  ]) {
+    const result = { ...response(), answers: { ...response().answers, securityBoundary: malformed as ReturnType<typeof response>["answers"]["securityBoundary"] } };
+    expect(() => assessReview(simpleChange, result)).toThrow("invalid Jev answer: securityBoundary");
   }
   expect(() => assessReview(simpleChange, { answers: {} } as ReturnType<typeof response>)).toThrow("invalid Jev answer");
   expect(() => assessReview(simpleChange, response(), NaN)).toThrow("max-risk");
@@ -60,6 +94,8 @@ test("policy requires one valid threshold for every built-in question", () => {
   expect(() => validateThresholds({ ...policy, securityBoundary: undefined }, true)).toThrow("Invalid threshold: securityBoundary");
   expect(() => validateThresholds({ ...policy, securityBoundary: 101 }, true)).toThrow("Invalid threshold: securityBoundary");
   expect(() => validateThresholds({ ...policy, extra: 10 }, true)).toThrow("Invalid threshold: extra");
+  expect(() => validateThresholds({ ...policy, publicBehavior: 20 }, true)).toThrow("Invalid threshold: publicBehavior");
+  expect(() => validateThresholds({ ...policy, insufficientContext: 20 }, true)).toThrow("Invalid threshold: insufficientContext");
   const { securityBoundary: _, ...missing } = policy;
   expect(() => validateThresholds(missing, true)).toThrow("every built-in question");
 });
@@ -118,7 +154,7 @@ test("real git and CLI: merge base, filenames, bounded evidence, outputs, and ex
       expect(outputs).toContain(`head-sha=${state.headSha}\n`);
       expect(outputs).toContain(`decision=${report.decision}\n`);
       const triage = JSON.parse(outputs.match(/^triage=(.*)$/m)?.[1] ?? "null");
-      expect(triage).toMatchObject({ decision: report.decision, headSha: state.headSha, baseSha: state.baseSha, reasons: report.reasons, signals: report.signals });
+      expect(triage).toMatchObject({ policyVersion: 3, decision: report.decision, headSha: state.headSha, baseSha: state.baseSha, reasons: report.reasons, signals: report.signals });
       expect(triage).not.toHaveProperty("diff");
     }
     await writeFile(preload, `globalThis.fetch = async () => Response.json(${JSON.stringify(response(0.1))});`);
@@ -127,7 +163,7 @@ test("real git and CLI: merge base, filenames, bounded evidence, outputs, and ex
     });
     const [customExit, customOutput] = await Promise.all([custom.exited, new Response(custom.stdout).text()]);
     expect(customExit).toBe(2);
-    expect(JSON.parse(customOutput).reasons).toEqual(["securityBoundary"]);
+    expect(JSON.parse(customOutput).reasons).toEqual(["securityBoundary:uncertain"]);
     await writeFile(join(repo, policyPath), JSON.stringify({ bypass: 100 }));
     git("add", "."); git("commit", "-qm", "change policy in PR");
     const policyCli = execFileSync(process.execPath, ["--no-env-file", "src/cli.ts", "--repo", repo, "--base", "main", "--task", "fix heading", "--policy", policyPath, "--dry-run"], { encoding: "utf8", env: { ...process.env, TYPESAFE_API_KEY: "" } });
@@ -138,7 +174,7 @@ test("real git and CLI: merge base, filenames, bounded evidence, outputs, and ex
     });
     const [policyExit, policyOutput] = await Promise.all([policyRun.exited, new Response(policyRun.stdout).text()]);
     expect(policyExit).toBe(2);
-    expect(JSON.parse(policyOutput).reasons).toEqual(["securityBoundary"]);
+    expect(JSON.parse(policyOutput).reasons).toEqual(["securityBoundary:uncertain"]);
     await expect(prepareState("task", "--help", repo)).rejects.toThrow();
     await expect(prepareState("task", "HEAD", repo)).rejects.toThrow("No committed changes");
     await writeFile(join(repo, "large.txt"), "x".repeat(65_000));

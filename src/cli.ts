@@ -19,7 +19,7 @@ export async function main(args = process.argv.slice(2)) {
     help: { type: "boolean", short: "h" },
   } });
   if (values.help) {
-    console.log("Usage: bun run triage --task <description> [--base origin/main] [--repo path]\n  --task-file path     Append task text from a file\n  --policy path        Complete question thresholds from the base commit\n  --max-risk 20        Default per-question threshold, 0–100 (experimental)\n  --thresholds JSON    Per-question threshold overrides\n  --json              Full report including native SDK results\n  --dry-run           Print the state and questions passed to the SDK\n  --enforce           Exit 2 for human_review; default is advisory");
+    console.log("Usage: bun run triage --task <description> [--base origin/main] [--repo path]\n  --task-file path     Append task text from a file\n  --policy path        Complete question thresholds from the base commit\n  --max-risk 20        Maximum concern + unresolved probability, 0–100 (experimental)\n  --thresholds JSON    Per-question threshold overrides\n  --json              Full report including native SDK results\n  --dry-run           Print the state and questions passed to the SDK\n  --enforce           Exit 2 for human_review; default is advisory");
     return;
   }
   const task = [values.task, values["task-file"] ? await readFile(values["task-file"], "utf8") : ""].filter(Boolean).join("\n\n").trim();
@@ -41,15 +41,15 @@ export async function main(args = process.argv.slice(2)) {
   if (!state.truncated && !state.opaqueChanges && !process.env.TYPESAFE_API_KEY?.trim()) throw new Error("Set TYPESAFE_API_KEY in .env (see .env.example)");
   const result = state.truncated || state.opaqueChanges ? undefined : await evaluateReview(state);
   const assessment = assessReview(state, result, maxRisk, thresholds);
-  const report = { mode: values.enforce ? "enforce" : "advisory", ...state, ...assessment, result };
+  const report = { policyVersion: 3, mode: values.enforce ? "enforce" : "advisory", ...state, ...assessment, result };
   const triage = {
-    decision: assessment.decision, headSha: state.headSha, baseSha: state.baseSha,
+    policyVersion: 3, decision: assessment.decision, headSha: state.headSha, baseSha: state.baseSha,
     riskScore: assessment.riskScore, reasons: assessment.reasons, signals: assessment.signals,
   };
   console.log(values.json ? JSON.stringify(report, null, 2) : [
     `Jev: ${assessment.decision} | ${assessment.riskScore === null ? "not scored" : `highest signal ${assessment.riskScore.toFixed(1)}/100`}`,
     `Files: ${state.changedFiles.length} | HEAD: ${state.headSha}`,
-    ...assessment.signals.map(signal => `  ${signal.id}: ${signal.risk.toFixed(1)}/100 (threshold ${signal.threshold})`),
+    ...assessment.signals.map(signal => `  ${signal.id}: ${signal.choice} | clear ${(signal.probabilities.clear * 100).toFixed(1)}%, concern ${(signal.probabilities.concern * 100).toFixed(1)}%, unresolved ${(signal.probabilities.unresolved * 100).toFixed(1)}% (combined non-clear ${signal.risk.toFixed(1)}, threshold ${signal.threshold})`),
     `Reasons: ${assessment.reasons.join(", ") || "all signals within threshold"}`,
   ].join("\n"));
   if (process.env.GITHUB_OUTPUT) {
