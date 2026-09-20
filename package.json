@@ -2,6 +2,7 @@
   "name": "jev-needs-review",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "description": "Small, advisory code-review triage using Jev",
   "packageManager": "bun@1.3.14",
