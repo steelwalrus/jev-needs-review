@@ -8,9 +8,9 @@ It does not merge, approve, comment, or run code from the reviewed repository.
 
 ## Why Jev
 
-[Jev](https://typesafe.ai) is a decision layer. Each question is scored with `noul`, the probability that the answer is yes, and code compares that number against a threshold.
+[Jev](https://typesafe.ai) is a decision layer. Each risk question uses `Choice` with three outcomes: `clear`, `concern`, and `unresolved`. Jev returns their probabilities; code decides whether review is required.
 
-This repo asks six questions about the diff. If `securityBoundary` scores high, the change likely touches auth, permissions, or secrets, so it goes to a human.
+This repo asks six questions about the diff. Each question assesses its own evidence. A security-boundary change is a review concern even when it appears intentional and correct.
 
 ## GitHub Action
 
@@ -45,16 +45,16 @@ The example uses the `v1` tag for this initial advisory release.
 | `api-key` | required | TypeSafe API key |
 | `task` | PR title and description | Intended change |
 | `base` | PR base SHA | Comparison commit |
-| `max-risk` | `20` | Default threshold for every question |
+| `max-risk` | `20` | Maximum combined concern + unresolved probability, as a percentage, for every question |
 | `thresholds` | `{}` | Per-question overrides as JSON |
 | `policy` | empty | Repo-relative JSON file with all six thresholds, read from the PR base commit |
 
 | Output | |
 | --- | --- |
 | `decision` | `merge_candidate` or `human_review` |
-| `risk-score` | Highest individual signal, 0–100; empty when Jev is skipped |
+| `risk-score` | Highest combined concern + unresolved probability, 0–100; empty when Jev is skipped |
 | `head-sha` | Exact reviewed commit |
-| `triage` | Full JSON: decision, both SHAs, per-signal scores, thresholds, reasons |
+| `triage` | Full JSON: policy version, decision, both SHAs, choices, probabilities, confidence, scores, thresholds and reasons |
 
 Read it downstream as `needs.jev.outputs.triage`.
 
@@ -62,13 +62,23 @@ The `if:` line skips fork PRs, which GitHub does not give secrets to. Pin `v1` t
 
 ## Thresholds
 
-Each signal returns 0–100. **A score above its threshold sends the PR to a human**, so a *lower* threshold is *stricter*.
+Each signal's decision score is `100 × (P(concern) + P(unresolved))`. **A score above its threshold sends the PR to a human**, so a lower threshold is stricter. At the experimental default of **20**, every risk must have at least **80% probability of `clear`** to qualify as a merge candidate.
 
-| | Effect |
+| Outcome | Meaning |
 | --- | --- |
-| `securityBoundary: 5` | Strict: any hint of auth or secrets goes to a human |
-| `coverageGap: 40` | Lenient: tolerates missing tests |
-| `20` (default) | Applies to every question you do not override |
+| `clear` | The evidence resolves this risk without a review concern, or this risk does not apply. |
+| `concern` | The evidence shows the named review trigger. This does not necessarily mean the code is defective. |
+| `unresolved` | A specific affected risk needs essential evidence that is absent. Missing unrelated repository context does not qualify. |
+
+`confidence` is retained for inspection; the gate uses the outcome probabilities directly. If `clear` is the most likely outcome but its probability is below the required level, the reason is `<signal>:uncertain`. Otherwise a blocking reason is `<signal>:concern` or `<signal>:unresolved`.
+
+These scores are not probabilities of a bug. The numerical default of 20 is a conservative starting rule for Choice, not a calibrated transfer of the old Noul threshold. The two primitives' scores are not directly comparable.
+
+| Setting | Effect |
+| --- | --- |
+| `securityBoundary: 5` | Requires at least 95% probability of clear for security. |
+| `coverageGap: 40` | Requires at least 60% probability of clear for test coverage. |
+| `20` (default) | Requires at least 80% probability of clear for every question without an override. |
 
 Set one bar for everything, or override per question:
 
@@ -83,11 +93,11 @@ For an organization policy, commit a JSON file to the consuming repository, for 
 ```json
 {
   "unrelatedChanges": 20,
-  "publicBehavior": 10,
+  "compatibilityRisk": 20,
+  "databaseRisk": 20,
   "coverageGap": 20,
   "complexityRisk": 20,
-  "securityBoundary": 5,
-  "insufficientContext": 20
+  "securityBoundary": 5
 }
 ```
 
@@ -110,13 +120,17 @@ All six live in [`src/questions.ts`](src/questions.ts).
 | Signal | Flags |
 | --- | --- |
 | `unrelatedChanges` | Work outside the stated task |
-| `publicBehavior` | API, CLI, or data-contract changes |
+| `compatibilityRisk` | Breaking existing callers, contracts, or functional user workflows |
+| `databaseRisk` | Schemas, migrations, constraints, or important stored-data changes; excludes read-only queries |
 | `coverageGap` | Removed, weakened, or missing regression tests |
-| `complexityRisk` | Complexity, coupling, dependencies, concurrency, lifecycle |
+| `complexityRisk` | Substantial complexity, coupling, concurrency, lifecycle risk, or conflicting patterns visible in the code |
 | `securityBoundary` | Auth, permissions, secrets, validation, exposure |
-| `insufficientContext` | Not enough evidence to judge |
 
 Questions are fixed in code. The policy file configures their thresholds, not their wording or behavior.
+
+Policy revision 3 replaces all Noul questions with Choice and removes the standalone `insufficientContext` question. Each of the six risks has its own narrowly defined `unresolved` outcome. Styling, copy, added page content, and isolated additive endpoints are not automatic compatibility concerns.
+
+For existing policy files, remove `insufficientContext`. If upgrading from revision 1, also replace `publicBehavior` with `compatibilityRisk` and add `databaseRisk`. Old keys are rejected. Re-evaluate thresholds against the new distributions. CLI JSON and Action `triage` carry `policyVersion: 3`; `signals` now include `choice`, `probabilities` and `confidence`, and reasons include their outcome suffix.
 
 ## CLI
 

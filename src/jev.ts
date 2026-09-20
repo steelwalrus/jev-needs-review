@@ -42,14 +42,26 @@ export function assessReview(state: ReviewState, result?: Result, maxRisk = 20, 
   const ids = Object.keys(reviewQuestions);
   const signals = ids.map(id => {
     const answer = result?.answers?.[id as keyof typeof reviewQuestions];
-    if (answer?.type !== "noul" || !Number.isFinite(answer.noul) || answer.noul < 0 || answer.noul > 1) {
+    const outcomes = ["clear", "concern", "unresolved"] as const;
+    const probabilities = answer?.probabilities;
+    if (answer?.type !== "choice" || !outcomes.includes(answer.choice) ||
+        !probabilities || Object.keys(probabilities).length !== outcomes.length ||
+        !outcomes.every(key => isRisk(probabilities[key]) && probabilities[key] <= 1) ||
+        Math.abs(outcomes.reduce((sum, key) => sum + probabilities[key], 0) - 1) > 1e-6 ||
+        probabilities[answer.choice] < Math.max(...outcomes.map(key => probabilities[key])) - 1e-6 ||
+        !isRisk(answer.confidence) || answer.confidence > 1) {
       throw new Error(`Missing or invalid Jev answer: ${id}`);
     }
-    return { id, risk: answer.noul * 100, threshold: thresholds[id as keyof Thresholds] ?? maxRisk };
+    return {
+      id, choice: answer.choice, probabilities, confidence: answer.confidence,
+      risk: (probabilities.concern + probabilities.unresolved) * 100,
+      threshold: thresholds[id as keyof Thresholds] ?? maxRisk,
+    };
   });
   // ponytail: worst individual signal, not a calibrated overall failure probability; calibrate on labelled PRs before waiving reviews.
   const riskScore = Math.max(...signals.map(signal => signal.risk));
-  const reasons = signals.filter(signal => signal.risk > signal.threshold).map(signal => signal.id);
+  const reasons = signals.filter(signal => signal.risk > signal.threshold + 1e-8)
+    .map(signal => `${signal.id}:${signal.choice === "clear" ? "uncertain" : signal.choice}`);
   return {
     decision: reasons.length ? "human_review" as const : "merge_candidate" as const,
     riskScore, maxRisk, thresholds, reasons, signals,
